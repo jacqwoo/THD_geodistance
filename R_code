@@ -1,0 +1,242 @@
+rm(list=ls())
+# -----------------------------------------------------------------------------
+# Title: Determining Lowe's Stores within A Specific Radius of THD Stores
+# Author: Jacqueline Woo, jzw2108@columbia.edu
+# Date: 2017
+# R Version: 3.6.3
+# RStudio Version: 1.2.5033
+# -----------------------------------------------------------------------------
+
+library(geosphere)
+library(dplyr)
+library(readr)
+
+#set wd
+setwd("C:/Users/jxw4692/Documents/R/FPM")
+load("geodistance.RData")
+
+#read lowes document
+lowes <- read.csv("lowes.csv",header=T,na.strings=c("","na","NA","N/A"))
+lowes <- lowes[,1:11]
+colnames(lowes) <- c("x1","x2","lowes_str","name","address","city","state","ZIP","open_date","lowes_lat","lowes_long")
+lowes_points <- lowes %>% select(lowes_str,lowes_long,lowes_lat)
+lowes_stores <- lowes %>% select(lowes_str)
+lowes_stores <- unlist(lowes_stores[,1]) #selecting lowes stores numbers and converting to vector
+
+#read thd document
+thd <- read.csv("thd.csv",header = T,na.strings=c("","na","NA","N/A")) %>%
+  mutate(mkt_nbr=as.numeric(as.character(MKT_NBR)),
+         thd_long=as.numeric(as.character(LNG_NBR)),thd_lat=as.numeric(as.character(LAT_NBR)),
+         thd_str=as.numeric(gsub(",","",LOC_NBR))) %>%
+  filter(LNG_NBR != "?")
+thd_points <- thd %>% select(thd_str,thd_long,thd_lat)
+thd_stores <- thd %>% select(thd_str)
+thd_stores <- unlist(thd_stores[,1]) #selecting THD stores numbers and converting to vectors
+
+#obtain all combinations of lowes and THD stores
+comb <- expand.grid(lowes_stores,thd_stores)
+test <- sample_n(comb,50)
+top <- head(comb,50)
+
+###separate comb into lowes stores and thd stores
+#Lowes
+lowes_stores_ordered <- as.data.frame(comb[,1])
+colnames(lowes_stores_ordered) <- c("lowes_str")
+lowes_stores_ordered$id <- 1:nrow(lowes_stores_ordered) #create column that has the original row number so we can sort later
+#THD
+thd_stores_ordered <- as.data.frame(comb[,2])
+thd_stores_ordered$id <- 1:nrow(thd_stores_ordered)
+colnames(thd_stores_ordered) <- c("thd_str","id")
+
+###join stores to their respective lats and longs and ensure that they stay in order!
+#Lowes
+lowes_points_all <- left_join(lowes_stores_ordered,lowes_points) %>% arrange(id)
+top_lowes <- head(lowes_points_all,50) #testing that ordering went right. compare with top
+lowes_points_latlong <- lowes_points_all %>% 
+  select(id,lowes_long,lowes_lat) %>% arrange(id) %>% select(lowes_long,lowes_lat)
+top_lowes_latlong <- head(lowes_points_latlong,50)
+#THD
+thd_points_all <- left_join(thd_stores_ordered,thd_points) %>% arrange(id)
+top_thd <- head(thd_points_all,50)
+thd_points_latlong <- thd_points_all %>% select(id,thd_long,thd_lat) %>% 
+  arrange(id) %>% select(thd_long,thd_lat)
+top_thd_latlong <- head(thd_points_latlong,50)
+
+#write latlongs to csv
+write.csv(thd_points_all,"thd_points_all.csv",row.names = F)
+write.csv(lowes_points_all,"lowes_points_all.csv",row.names = F)
+
+#freeing some memory if necessary--try geodistance section first
+rm(comb,lowes,lowes_points,lowes_points_all,lowes_stores_ordered,test,thd,thd_points,thd_points_all,thd_stores_ordered,top_lowes,top_lowes_latlong,top_thd,top_thd_latlong)
+gc()
+
+#geodistance
+distance <- distHaversine(lowes_points_latlong,thd_points_latlong)
+distance <- as.data.frame(distance)
+
+#join thd and lowes latlongs
+thdlowes_dist <- cbind(lowes_points_all,distance) %>% cbind(thd_points_all)
+colnames(thdlowes_dist) <- c("lowes_str","lowes_id","lowes_long","lowes_lat","dist","thd_str","thd_id","thd_long","thd_lat")
+top <- head(thdlowes_dist,50)
+
+#converting meters to miles
+library(measurements)
+thdlowes_dist$dist_mi <- conv_unit(thdlowes_dist$dist,"m","mi")
+dist_test <- thdlowes_dist %>% filter(dist_mi==min(dist_mi)) #finding the minimum distance calculated
+
+#freeing up space
+rm(distance,comb)
+
+#import in competitive radius. Original competitive radius spreadsheet has duplicates for LONG ISLND, TMPA/STPET, N ORLEANS
+radius <- read.csv("competitive_radius.csv",header=T,na.strings=c("","na","NA","N/A")) %>% 
+  select(`Market.Nbr`,`Market.Name`,`Competitive.Radius`) %>% 
+  rename(mkt_nbr=`Market.Nbr`,mkt_nm=`Market.Name`,radius=`Competitive.Radius`)
+
+#import OPMs
+opm <- read.csv("OPM_List.csv",header=T,na.strings=c("","na","NA","N/A"))
+colnames(opm) <- c("OPM","Grouping","market_nbr","mkt_nm","str_nbr","str_nm","feedback")
+opm <- opm %>% mutate(thd_str=as.numeric(str_nbr),mkt_nbr=as.numeric(market_nbr)) %>%
+  select(OPM,mkt_nbr,mkt_nm,thd_str) 
+
+#join radius to thd stores to get competitive radius for each store
+store_radius <- left_join(thd,radius) %>% select(mkt_nbr,mkt_nm,thd_str,radius,thd_long,thd_lat) %>%
+  left_join(.,opm)
+
+#join competitive radius to thdlowes_dist to obtain store combinations within competitive distance
+thdlowes_radius <- left_join(thdlowes_dist,store_radius)
+
+#only select combinations within competitive distance
+thdlowes_comp <- thdlowes_radius%>%filter(dist_mi<=radius)%>%
+  select(lowes_str,lowes_long,lowes_lat,thd_str,thd_long,thd_lat,dist_mi,mkt_nbr,mkt_nm,radius,OPM)%>%
+  mutate(id=1:nrow(.))
+
+#create list of THD stores with Lowe's stores within comp radius
+thd_comp <- thdlowes_comp %>% 
+  select(thd_str,thd_long,thd_lat,mkt_nbr,radius,OPM,mkt_nm) %>%
+  mutate(retailer="THD Impacted") %>% unique(.)
+
+#ID stores that are not impacted by Lowe's
+thd_no_comp <- anti_join(store_radius,thd_comp,by="thd_str") %>% 
+  mutate(retailer="THD Non-Impacted")
+
+#join all THD stores with indicators on impacted or not
+thd_all <- full_join(thd_comp,thd_no_comp)
+colnames(thd_all) <- c("str_nbr","long","lat","mkt_nbr","radius","OPM","mkt_nm","retailer")
+
+#lowes stores within comp radius
+lowes_comp <- thdlowes_comp %>% 
+  select(lowes_str,lowes_long,lowes_lat)%>%mutate(retailer="Lowes Impact",OPM=NA,radius=NA,mkt_nbr=NA,mkt_nm=NA)%>%
+  unique(.)%>%select(lowes_str,lowes_long,lowes_lat,mkt_nbr,radius,OPM,mkt_nm,retailer)%>%
+  rename(str_nbr=lowes_str,long=lowes_long,lat=lowes_lat)
+
+#ID stores that don't have an impact on THD stores
+lowes_no_comp <- lowes %>% select(lowes_str,lowes_lat,lowes_long) %>% 
+  rename(str_nbr=lowes_str,lat=lowes_lat,long=lowes_long) %>%
+  anti_join(.,lowes_comp,by="str_nbr")%>%mutate(mkt_nbr=NA,radius=NA,OPM=NA,mkt_nm=NA,retailer="Lowes No Impact")
+
+#join all Lowe's stores with indicators on impacted or not
+lowes_all <- full_join(lowes_comp,lowes_no_comp)
+
+#combining lowes and THD stores with indicators on impacted or not
+thdlowes_list <- rbind(lowes_all,thd_all)
+
+#write to csv
+write.csv(thdlowes_list,"thdlowes_list.csv",row.names=F)
+
+#obtain thdlowes_comp table just with stores
+thdlowes_small <- thdlowes_comp %>% select(lowes_str,thd_str)
+thdlowes_count <- thdlowes_small %>% group_by(lowes_str) %>% summarize(thd_count=n()) %>% arrange(desc(thd_count))
+
+#Do a for-loop that selects the most impactful stores and removes duplications
+N <- 757
+loweslist <- vector("list",N)
+for(i in 1:N) {
+  str <- thdlowes_count$lowes_str[1]
+  lowes_str <- str #paste lowe's stores in a list
+  loweslist[i] <- lowes_str
+  thdlist <- thdlowes_comp %>% filter(lowes_str==str) %>% select(thd_str)
+  thdlist <- as.list(thdlist$thd_str)
+  thdlowes_small <- subset(thdlowes_small,!(thd_str %in% thdlist))
+  thdlowes_count <- thdlowes_small %>% group_by(lowes_str) %>% summarize(thd_count=n()) %>% arrange(desc(thd_count))
+}
+#757 loops needed for Lowe's
+
+#convert list of Lowe's stores into dataframe and map to THD stores
+store_selection <- as.data.frame(unlist(loweslist)) %>% 
+  rename(lowes_str=`unlist(loweslist)`)
+store_selection_combine <- left_join(store_selection,thdlowes_comp) %>% 
+  mutate(lowes_long2=round(lowes_long,digit=3),lowes_lat2=round(lowes_lat,digit=3),thd_long2=round(thd_long,digit=3),thd_lat2=round(thd_lat,digit=3))%>%
+  select(lowes_str,lowes_long2,lowes_lat2,thd_str,thd_long2,thd_lat2,dist_mi,mkt_nbr,mkt_nm,radius,OPM)%>%
+  rename(lowes_long=lowes_long2,lowes_lat=lowes_lat2,thd_long=thd_long2,thd_lat=thd_lat2)
+
+###Finding Lowe's stores that we recommend scraping vs not and THD stores impacted vs not
+#Lowes
+lowes_selection <- store_selection_combine %>% 
+  select(lowes_str,lowes_long,lowes_lat) %>% 
+  mutate(mkt_nbr=NA,radius=NA,OPM=NA,mkt_nm=NA,retailer='Lowes Selected Store')%>%unique(.)%>%
+  rename(str_nbr=lowes_str,long=lowes_long,lat=lowes_lat)
+lowes_selection_dup <- store_selection_combine %>% 
+  select(lowes_str,lowes_long,lowes_lat,mkt_nbr,radius,OPM,mkt_nm) %>%
+  mutate(retailer='Lowes Selected Store')%>%
+  unique(.)%>%rename(str_nbr=lowes_str,long=lowes_long,lat=lowes_lat)
+#THD
+thd_selection <- store_selection_combine %>% 
+  mutate(retailer="THD Covered") %>%select(thd_str,thd_long,thd_lat,mkt_nbr,radius,OPM,mkt_nm,retailer) %>%
+  unique(.) %>% rename(str_nbr=thd_str,long=thd_long,lat=thd_lat)
+  #all THD stores that are impacted by Lowe's are covered, so just use thd_no_comp for the rest of the THD stores
+
+#ID stores that we don't recommend scraping
+lowes_no_selection <- anti_join(lowes_comp,lowes_selection,by="str_nbr") %>% 
+  select(str_nbr,long,lat,mkt_nbr,radius,OPM,mkt_nm)%>%mutate(retailer="Lowes Impact No Selection")
+lowes_no_selection_dup <- thdlowes_comp %>% 
+  select(lowes_str,lowes_long,lowes_lat,mkt_nbr,mkt_nm,radius,OPM)%>%unique(.)%>%
+  rename(str_nbr=lowes_str,long=lowes_long,lat=lowes_lat)%>%
+  anti_join(.,lowes_selection_dup,by="str_nbr")%>%mutate(retailer="Lowes Impact No Selection")%>%
+  select(str_nbr,long,lat,mkt_nbr,radius,OPM,mkt_nm,retailer)
+
+#select THD stores that will not be covered, if needed--did not do this on 10/24
+thd_no_coverage <- thd_opm %>% anti_join(.,store_selection_thd,by="str_nbr") %>%
+  mutate(radius=NA,retailer="THD Not Covered") %>% select(str_nbr,long,lat,mkt_nbr,mkt_nm,radius,OPM,retailer)
+
+#reorganize THD stores that have no competition
+thd_no_comp <- thd_no_comp %>% rename(str_nbr=thd_str,long=thd_long,lat=thd_lat)%>%
+  select(str_nbr,long,lat,mkt_nbr,radius,OPM,mkt_nm,retailer)
+
+#join everything all together--with all unique stores
+store_selection_all <- rbind(lowes_selection,thd_selection) %>% 
+  rbind(.,thd_no_comp)%>%rbind(.,lowes_no_comp)%>%rbind(.,lowes_no_selection)
+
+#join everything all together--with duplicates and Lowe's stores mapped to markets/OPMs
+store_selection_dup <- rbind(lowes_selection_dup,thd_selection) %>% 
+  rbind(.,thd_no_comp)%>%rbind(.,lowes_no_comp)%>%rbind(.,lowes_no_selection_dup)
+
+#count of THD stores that Lowe's stores impact. Include instances where Lowe's overlaps in multiple OPMs.
+lowesthd_impact <- thdlowes_comp %>% mutate(long=round(lowes_long,digits=3),lat=round(lowes_lat,digits=3))%>%
+  group_by(lowes_str,long,lat,OPM) %>% summarize(thd_count = n())
+
+#group store_selection_dup by count of OPMs
+OPM_count <- store_selection_dup %>% filter(retailer=='Lowes Selected Store' | retailer=='THD Covered')%>%
+  group_by(OPM,retailer) %>% summarize(count=n())
+
+#find the number of THD stores that are covered for a selection of Lowe's stores
+customthd_impact <- thdlowes_comp %>% filter (OPM=='129A' & lowes_str %in% 
+                                                c('721','1098','1180','2767')) %>%
+  distinct(thd_str)
+
+###determining how many THD stores are covered by the existing Lowe's scrapes
+##load csv of existing scraped stores
+bl_stores <- read.csv("bl_stores.csv",header=T,na.strings=c("","na","NA","N/A")) %>% mutate(thd_str=as.numeric(BL_Stores)) %>%
+  select(thd_str)
+existingthd_impact <- thdlowes_comp %>% inner_join(.,bl_stores) %>% unique(.)
+existingopm_impact <- existingthd_impact %>% select(thd_str,OPM) %>% unique(.) %>% group_by(OPM) %>% summarize(str_count=n())
+setwd("C:/Users/jxw4692/Documents/R/FPM/201710")
+write.csv(existingopm_impact,"existingopm_impact.csv",row.names=F)
+
+#write data in csv
+write.csv(store_selection_all,"store_selection_all.csv",row.names=F)
+write.csv(store_selection_dup,"store_selection_dup.csv",row.names=F)
+write.csv(lowesthd_impact,"lowesthd_impact.csv",row.names=F)
+write.csv(OPM_count,"OPM_count.csv",row.names=F)
+
+#save data
+save(list=ls(all = TRUE),file="geodistance.RData")
